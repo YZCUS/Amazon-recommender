@@ -93,7 +93,8 @@ def main() -> None:
                 "asin", "avg_sentiment", "avg_rating", "avg_helpful_ratio", "review_count"
             ])
         if os.path.isdir(path):
-            spark = SparkSession.builder.appName("RankingEngineLoad").getOrCreate()
+            spark = SparkSession.builder.appName(
+                "RankingEngineLoad").getOrCreate()
             sdf = spark.read.option("header", "true").csv(path)
             pdf = sdf.toPandas()
             # Cast expected numeric columns

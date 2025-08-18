@@ -40,7 +40,7 @@ A sophisticated data-driven recommendation system for Amazon products that lever
   - Topic-2: Final top 5 recommendations from review analysis
 - **ngrok**: Secure tunnel for external access
 
-#### 4. Review Analysis Module
+#### 4. 
 - **Dataset**: 2,475,451 cleaned reviews
 - **Verification Strategy**: Includes both verified (93.5%) and unverified (6.5%) reviews
 - **Metrics Analyzed**:

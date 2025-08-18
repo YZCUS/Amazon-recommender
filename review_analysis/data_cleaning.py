@@ -48,39 +48,47 @@ def read_reviews(spark: SparkSession, path: str) -> "F.DataFrame":
 
 
 def deduplicate_reviews(df: "F.DataFrame") -> "F.DataFrame":
-    cols_for_exact = [c for c in ["asin", "user_id", "timestamp", "text"] if c in df.columns]
+    cols_for_exact = [c for c in ["asin", "user_id",
+                                  "timestamp", "text"] if c in df.columns]
     if cols_for_exact:
         df = df.dropDuplicates(cols_for_exact)
 
     # Prefer user_id without underscore suffix when duplicates exist for same (text, timestamp)
     if set(["text", "timestamp", "user_id"]).issubset(set(df.columns)):
-        win = Window.partitionBy("text", "timestamp").orderBy(F.expr("user_id LIKE '%\\_%'"))
-        df = df.withColumn("_rank", F.row_number().over(win)).filter(F.col("_rank") == 1).drop("_rank")
+        win = Window.partitionBy("text", "timestamp").orderBy(
+            F.expr("user_id LIKE '%\\_%'"))
+        df = df.withColumn("_rank", F.row_number().over(
+            win)).filter(F.col("_rank") == 1).drop("_rank")
     return df
 
 
 def standardize_columns(df: "F.DataFrame") -> "F.DataFrame":
     # Unify rating field
-    rating_col = "rating" if "rating" in df.columns else ("overall" if "overall" in df.columns else None)
+    rating_col = "rating" if "rating" in df.columns else (
+        "overall" if "overall" in df.columns else None)
     if rating_col is None:
         df = df.withColumn("rating", F.lit(None).cast("float"))
     elif rating_col != "rating":
         df = df.withColumn("rating", F.col(rating_col).cast("float"))
 
     # Unify review text
-    text_col = "text" if "text" in df.columns else ("reviewText" if "reviewText" in df.columns else None)
+    text_col = "text" if "text" in df.columns else (
+        "reviewText" if "reviewText" in df.columns else None)
     if text_col is None:
         df = df.withColumn("review_text_clean", F.lit(""))
     else:
-        df = df.withColumn("review_text_clean", F.regexp_replace(F.lower(F.col(text_col)), r"\s+", " ").cast("string"))
+        df = df.withColumn("review_text_clean", F.regexp_replace(
+            F.lower(F.col(text_col)), r"\s+", " ").cast("string"))
 
     # Helpful votes (support either helpful_vote or [helpful_yes, total] in 'helpful')
     if "helpful_vote" in df.columns:
         df = df.withColumn("helpful_yes", F.col("helpful_vote").cast("int"))
         df = df.withColumn("total_votes", F.lit(None).cast("int"))
     elif "helpful" in df.columns:
-        df = df.withColumn("helpful_yes", F.when(F.size(F.col("helpful")) >= 1, F.col("helpful")[0]).otherwise(0).cast("int"))
-        df = df.withColumn("total_votes", F.when(F.size(F.col("helpful")) >= 2, F.col("helpful")[1]).otherwise(0).cast("int"))
+        df = df.withColumn("helpful_yes", F.when(
+            F.size(F.col("helpful")) >= 1, F.col("helpful")[0]).otherwise(0).cast("int"))
+        df = df.withColumn("total_votes", F.when(
+            F.size(F.col("helpful")) >= 2, F.col("helpful")[1]).otherwise(0).cast("int"))
     else:
         df = df.withColumn("helpful_yes", F.lit(0).cast("int"))
         df = df.withColumn("total_votes", F.lit(0).cast("int"))
@@ -104,9 +112,12 @@ def standardize_columns(df: "F.DataFrame") -> "F.DataFrame":
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Review data cleaning CLI (PySpark)")
-    parser.add_argument("--reviews-path", default=os.path.join("data", "Amazon_Fashion.jsonl"), help="Path to raw reviews (JSONL/JSON/CSV)")
-    parser.add_argument("--output-csv", default=os.path.join("data", "cleaned_reviews.csv"), help="Output path for cleaned reviews CSV")
+    parser = argparse.ArgumentParser(
+        description="Review data cleaning CLI (PySpark)")
+    parser.add_argument("--reviews-path", default=os.path.join("data",
+                        "Amazon_Fashion.jsonl"), help="Path to raw reviews (JSONL/JSON/CSV)")
+    parser.add_argument("--output-csv", default=os.path.join("data",
+                        "cleaned_reviews.csv"), help="Output path for cleaned reviews CSV")
     args = parser.parse_args()
 
     spark = get_spark()
@@ -115,11 +126,10 @@ def main() -> None:
     cleaned = standardize_columns(df)
 
     os.makedirs(os.path.dirname(args.output_csv), exist_ok=True)
-    cleaned.coalesce(1).write.mode("overwrite").option("header", "true").csv(args.output_csv)
+    cleaned.coalesce(1).write.mode("overwrite").option(
+        "header", "true").csv(args.output_csv)
     print(f"Saved cleaned reviews to: {args.output_csv}")
 
 
 if __name__ == "__main__":
     main()
-
-
