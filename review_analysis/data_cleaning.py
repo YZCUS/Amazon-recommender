@@ -1,122 +1,121 @@
-"""Review data cleaning utilities and CLI.
+"""Review data cleaning utilities and CLI (PySpark).
 
-This module loads raw review data, normalizes textual fields, and computes helpfulness
-ratios in a robust way to support downstream sentiment analysis and ranking.
+This module loads raw review data (JSONL or CSV) using Spark, deduplicates rows
+following the notebook logic, and standardizes columns for downstream analysis.
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import os
-import re
-from typing import Tuple
+from typing import List
 
-import numpy as np
-import pandas as pd
-
-
-_WHITESPACE_RE = re.compile(r"\s+")
+from pyspark.sql import SparkSession, Window
+from pyspark.sql import functions as F
+from pyspark.sql import types as T
 
 
-def _to_string(value: object) -> str:
-    """Convert arbitrary review text-like value to a clean lowercase string."""
-    if isinstance(value, str):
-        text = value
-    elif value is None or (isinstance(value, float) and np.isnan(value)):
-        text = ""
-    else:
-        text = str(value)
-    text = text.lower()
-    text = _WHITESPACE_RE.sub(" ", text).strip()
-    return text
-
-
-def _parse_helpful(value: object) -> Tuple[int, int]:
-    """Parse helpful votes into (helpful_yes, total_votes).
-
-    Supports multiple formats commonly seen in Amazon datasets:
-    - Python list string like "[3, 5]"
-    - Two integers in a tuple-like string
-    - Two separate columns handled upstream
-    """
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return 0, 0
-    if isinstance(value, (list, tuple)) and len(value) == 2:
-        return int(value[0] or 0), int(value[1] or 0)
-    if isinstance(value, str):
-        try:
-            parsed = ast.literal_eval(value)
-            if isinstance(parsed, (list, tuple)) and len(parsed) == 2:
-                return int(parsed[0] or 0), int(parsed[1] or 0)
-        except Exception:
-            pass
-    return 0, 0
-
-
-def load_reviews(path: str | None = None) -> pd.DataFrame:
-    """Load reviews from CSV; if not found, return a tiny demo dataset."""
-    if path and os.path.exists(path):
-        return pd.read_csv(path)
-    # Minimal demo rows to keep CLI functional without external data
-    return pd.DataFrame(
-        [
-            {"asin": "B08R39MRDW", "reviewText": "Great sound and battery.", "overall": 5, "helpful": "[4, 5]"},
-            {"asin": "B07PZR3PVB", "reviewText": "Decent, but fit is not perfect.", "overall": 3, "helpful": "[2, 4]"},
-            {"asin": "B08R39MRDW", "reviewText": "Bass is strong.", "overall": 4, "helpful": "[1, 2]"},
-        ]
+def get_spark(app_name: str = "ReviewDataCleaning") -> SparkSession:
+    return (
+        SparkSession.builder.appName(app_name)
+        .config("spark.sql.shuffle.partitions", "200")
+        .getOrCreate()
     )
 
 
-def clean_reviews(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a cleaned reviews DataFrame with text and helpfulness fields normalized."""
-    required_cols = ["asin", "overall"]
-    for col in required_cols:
-        if col not in df.columns:
-            raise ValueError(f"Input reviews must contain column '{col}'")
+def read_reviews(spark: SparkSession, path: str) -> "F.DataFrame":
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".json", ".jsonl"):
+        # Flexible schema covering common Amazon review fields
+        schema = T.StructType(
+            [
+                T.StructField("asin", T.StringType(), True),
+                T.StructField("parent_asin", T.StringType(), True),
+                T.StructField("user_id", T.StringType(), True),
+                T.StructField("rating", T.FloatType(), True),
+                T.StructField("overall", T.FloatType(), True),
+                T.StructField("timestamp", T.LongType(), True),
+                T.StructField("verified_purchase", T.BooleanType(), True),
+                T.StructField("helpful_vote", T.IntegerType(), True),
+                T.StructField("helpful", T.ArrayType(T.IntegerType()), True),
+                T.StructField("text", T.StringType(), True),
+                T.StructField("reviewText", T.StringType(), True),
+            ]
+        )
+        return spark.read.schema(schema).json(path)
+    # CSV fallback with header inference
+    return spark.read.option("header", "true").csv(path)
 
-    cleaned = df.copy()
-    text_col = "reviewText" if "reviewText" in cleaned.columns else ("review_text" if "review_text" in cleaned.columns else None)
+
+def deduplicate_reviews(df: "F.DataFrame") -> "F.DataFrame":
+    cols_for_exact = [c for c in ["asin", "user_id", "timestamp", "text"] if c in df.columns]
+    if cols_for_exact:
+        df = df.dropDuplicates(cols_for_exact)
+
+    # Prefer user_id without underscore suffix when duplicates exist for same (text, timestamp)
+    if set(["text", "timestamp", "user_id"]).issubset(set(df.columns)):
+        win = Window.partitionBy("text", "timestamp").orderBy(F.expr("user_id LIKE '%\\_%'"))
+        df = df.withColumn("_rank", F.row_number().over(win)).filter(F.col("_rank") == 1).drop("_rank")
+    return df
+
+
+def standardize_columns(df: "F.DataFrame") -> "F.DataFrame":
+    # Unify rating field
+    rating_col = "rating" if "rating" in df.columns else ("overall" if "overall" in df.columns else None)
+    if rating_col is None:
+        df = df.withColumn("rating", F.lit(None).cast("float"))
+    elif rating_col != "rating":
+        df = df.withColumn("rating", F.col(rating_col).cast("float"))
+
+    # Unify review text
+    text_col = "text" if "text" in df.columns else ("reviewText" if "reviewText" in df.columns else None)
     if text_col is None:
-        cleaned["review_text_clean"] = ""
+        df = df.withColumn("review_text_clean", F.lit(""))
     else:
-        cleaned["review_text_clean"] = cleaned[text_col].map(_to_string)
+        df = df.withColumn("review_text_clean", F.regexp_replace(F.lower(F.col(text_col)), r"\s+", " ").cast("string"))
 
-    # Parse helpful into two columns
-    helpful_yes = np.zeros(len(cleaned), dtype=np.int64)
-    total_votes = np.zeros(len(cleaned), dtype=np.int64)
-
-    if "helpful" in cleaned.columns:
-        pairs = cleaned["helpful"].map(_parse_helpful)
-        helpful_yes = np.array([p[0] for p in pairs], dtype=np.int64)
-        total_votes = np.array([p[1] for p in pairs], dtype=np.int64)
+    # Helpful votes (support either helpful_vote or [helpful_yes, total] in 'helpful')
+    if "helpful_vote" in df.columns:
+        df = df.withColumn("helpful_yes", F.col("helpful_vote").cast("int"))
+        df = df.withColumn("total_votes", F.lit(None).cast("int"))
+    elif "helpful" in df.columns:
+        df = df.withColumn("helpful_yes", F.when(F.size(F.col("helpful")) >= 1, F.col("helpful")[0]).otherwise(0).cast("int"))
+        df = df.withColumn("total_votes", F.when(F.size(F.col("helpful")) >= 2, F.col("helpful")[1]).otherwise(0).cast("int"))
     else:
-        if "helpful_yes" in cleaned.columns:
-            helpful_yes = cleaned["helpful_yes"].fillna(0).astype(int).to_numpy()
-        if "total_votes" in cleaned.columns:
-            total_votes = cleaned["total_votes"].fillna(0).astype(int).to_numpy()
+        df = df.withColumn("helpful_yes", F.lit(0).cast("int"))
+        df = df.withColumn("total_votes", F.lit(0).cast("int"))
 
-    total_safe = np.where(total_votes == 0, 1, total_votes)
-    helpful_ratio = helpful_yes / total_safe
+    # Choose product identifier as 'asin'
+    if "asin" not in df.columns and "parent_asin" in df.columns:
+        df = df.withColumn("asin", F.col("parent_asin"))
 
-    cleaned["helpful_yes"] = helpful_yes
-    cleaned["total_votes"] = total_votes
-    cleaned["helpful_ratio"] = helpful_ratio.astype(np.float32)
-    cleaned["overall"] = pd.to_numeric(cleaned["overall"], errors="coerce").fillna(0).astype(np.float32)
-    return cleaned[["asin", "review_text_clean", "overall", "helpful_yes", "total_votes", "helpful_ratio"]]
+    # Verified purchase flag normalization
+    if "verified_purchase" not in df.columns:
+        df = df.withColumn("verified_purchase", F.lit(None).cast("boolean"))
+
+    return df.select(
+        "asin",
+        "review_text_clean",
+        "rating",
+        "helpful_yes",
+        "total_votes",
+        "verified_purchase",
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Review data cleaning CLI")
-    parser.add_argument("--reviews-csv", default=os.path.join("data", "reviews.csv"), help="Path to raw reviews CSV")
-    parser.add_argument("--output-csv", default=os.path.join("data", "cleaned_reviews.csv"), help="Output path for cleaned reviews")
+    parser = argparse.ArgumentParser(description="Review data cleaning CLI (PySpark)")
+    parser.add_argument("--reviews-path", default=os.path.join("data", "Amazon_Fashion.jsonl"), help="Path to raw reviews (JSONL/JSON/CSV)")
+    parser.add_argument("--output-csv", default=os.path.join("data", "cleaned_reviews.csv"), help="Output path for cleaned reviews CSV")
     args = parser.parse_args()
 
-    df = load_reviews(args.reviews_csv)
-    cleaned = clean_reviews(df)
+    spark = get_spark()
+    df = read_reviews(spark, args.reviews_path)
+    df = deduplicate_reviews(df)
+    cleaned = standardize_columns(df)
 
     os.makedirs(os.path.dirname(args.output_csv), exist_ok=True)
-    cleaned.to_csv(args.output_csv, index=False)
+    cleaned.coalesce(1).write.mode("overwrite").option("header", "true").csv(args.output_csv)
     print(f"Saved cleaned reviews to: {args.output_csv}")
 
 

@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from similarity.metadata_analysis import find_similar_products_spark
+from pyspark.sql import SparkSession
 
 
 @dataclass
@@ -85,12 +86,26 @@ def main() -> None:
                         help="Number of final recommendations")
     args = parser.parse_args()
 
-    if os.path.exists(args.reviews_summary_csv):
-        review_summary = pd.read_csv(args.reviews_summary_csv)
-    else:
-        # Fall back to empty summary to keep CLI usable
-        review_summary = pd.DataFrame(
-            columns=["asin", "avg_sentiment", "avg_rating", "avg_helpful_ratio", "review_count"])
+    # Load review summary written by Spark (directory CSV) or single CSV file
+    def _load_review_summary(path: str) -> pd.DataFrame:
+        if not os.path.exists(path):
+            return pd.DataFrame(columns=[
+                "asin", "avg_sentiment", "avg_rating", "avg_helpful_ratio", "review_count"
+            ])
+        if os.path.isdir(path):
+            spark = SparkSession.builder.appName("RankingEngineLoad").getOrCreate()
+            sdf = spark.read.option("header", "true").csv(path)
+            pdf = sdf.toPandas()
+            # Cast expected numeric columns
+            for col in ["avg_sentiment", "avg_rating", "avg_helpful_ratio", "review_count"]:
+                if col in pdf.columns:
+                    pdf[col] = pd.to_numeric(pdf[col], errors="coerce")
+            if "asin" in pdf.columns:
+                pdf["asin"] = pdf["asin"].astype(str)
+            return pdf
+        return pd.read_csv(path)
+
+    review_summary = _load_review_summary(args.reviews_summary_csv)
 
     results = rank_candidates(
         input_asin=args.input_asin,

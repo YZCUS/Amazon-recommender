@@ -56,7 +56,8 @@ def build_feature_pipeline(num_features: int = 2000) -> Pipeline:
     hashing_tf = HashingTF(inputCol="filtered_words",
                            outputCol="rawFeatures", numFeatures=num_features)
     idf = IDF(inputCol="rawFeatures", outputCol="idfFeatures")
-    assembler = VectorAssembler(inputCols=["idfFeatures"], outputCol="features_vec")
+    assembler = VectorAssembler(
+        inputCols=["idfFeatures"], outputCol="features_vec")
     normalizer = Normalizer(inputCol="features_vec",
                             outputCol="normalized_features")
     return Pipeline(stages=[tokenizer, remover, hashing_tf, idf, assembler, normalizer])
