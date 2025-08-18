@@ -177,7 +177,7 @@ python review_analysis/ranking_engine.py --top-k 5
 
 ## 🤝 Contributors
 
-- **Zheng-Chen Yao** (zy2876) - Lead Developer
+- **Zheng-Chen Yao** (zy2876)
 - **Reet Nandy** (rn2528)
 - **Jacqueline Ji** (xj235)
 - **Yu-Yuan Chang** (yc6549)
